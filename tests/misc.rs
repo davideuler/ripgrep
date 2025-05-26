@@ -1128,3 +1128,96 @@ rgtest!(sortr_accessed, |dir: Dir, mut cmd: TestCommand| {
     let expected = "dir/d:test\nb:test\ndir/c:test\na:test\n";
     eqnice!(expected, cmd.args(["--sortr", "accessed", "test"]).stdout());
 });
+
+// Tests for --and flag
+
+rgtest!(and_basic, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "apple banana orange\napple grape");
+    cmd.arg("--and").arg("apple banana").arg("f1.txt");
+    let expected = "apple banana orange\n";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_basic_no_match_one, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "apple banana orange\napple grape");
+    cmd.arg("--and").arg("apple mango").arg("f1.txt");
+    let expected = "";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_basic_no_match_all, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "apple banana orange\napple grape");
+    cmd.arg("--and").arg("mango pear").arg("f1.txt");
+    let expected = "";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_with_primary_pattern, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "red apple tasty\nblue apple sweet\ngreen banana yummy");
+    cmd.arg("apple").arg("--and").arg("tasty red").arg("f1.txt");
+    let expected = "red apple tasty\n";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_with_primary_pattern_no_match_and, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "red apple tasty\nblue apple sweet\ngreen banana yummy");
+    cmd.arg("apple").arg("--and").arg("yummy").arg("f1.txt");
+    let expected = "";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_case_insensitive, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "Apple Banana Orange\napple grape");
+    cmd.arg("-i").arg("--and").arg("apple BANANA").arg("f1.txt");
+    let expected = "Apple Banana Orange\n";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_case_sensitive_mismatch, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "Apple Banana Orange\napple banana");
+    cmd.arg("--and").arg("apple BANANA").arg("f1.txt");
+    let expected = "";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_empty_string_keywords, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "line one\nline two");
+    cmd.arg("--and").arg("").arg("f1.txt");
+    let expected = "line one\nline two\n";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_keywords_with_internal_spaces_as_separate, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "key1 then part2 and key3\nkey1 part2");
+    cmd.arg("--and").arg("key1 part2 key3").arg("f1.txt");
+    let expected = "key1 then part2 and key3\n";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_no_primary_pattern_only_and, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "apple banana\napple only\nbanana only");
+    cmd.arg("--and").arg("apple banana").arg("f1.txt");
+    let expected = "apple banana\n";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_no_primary_pattern_only_and_no_match, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "apple banana\napple only\nbanana only");
+    cmd.arg("--and").arg("apple mango").arg("f1.txt");
+    let expected = "";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_with_line_numbers, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "hello world\nworld is round\nhello again");
+    cmd.arg("-n").arg("--and").arg("hello world").arg("f1.txt");
+    let expected = "1:hello world\n";
+    eqnice!(expected, cmd.stdout());
+});
+
+rgtest!(and_with_primary_and_line_numbers, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("f1.txt", "alpha beta gamma del\ndelta beta alpha eps\nalpha zeta");
+    cmd.arg("-n").arg("beta").arg("--and").arg("alpha eps").arg("f1.txt");
+    let expected = "2:delta beta alpha eps\n";
+    eqnice!(expected, cmd.stdout());
+});

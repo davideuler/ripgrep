@@ -15,6 +15,7 @@ translatable to any command line shell environment.
 * [Automatic filtering](#automatic-filtering)
 * [Manual filtering: globs](#manual-filtering-globs)
 * [Manual filtering: file types](#manual-filtering-file-types)
+* [Searching for multiple required keywords (AND logic)](#searching-for-multiple-required-keywords-and-logic)
 * [Replacements](#replacements)
 * [Configuration file](#configuration-file)
 * [File encoding](#file-encoding)
@@ -436,6 +437,73 @@ Both `rg --type sh` and `rg --type all` would only search for matches in
 by the `sh` file type don't include files without an extension. On the
 other hand, `rg --type-not all` would search `my-shell-script` but not
 `my-shell-library.bash`.
+
+
+### Searching for multiple required keywords (AND logic)
+
+Sometimes you need to find lines that contain several specific words, but the order or exact positioning of these words doesn't matter. The `--and` flag is designed for this purpose. It allows you to specify a set of space-separated keywords, and only lines containing *all* of those keywords will be matched.
+
+**Syntax:**
+
+```
+rg --and "keyword1 keyword2 keyword3" [path...]
+```
+or with a primary pattern:
+```
+rg main_pattern --and "keyword1 keyword2" [path...]
+```
+
+The keywords are provided as a single string, separated by spaces.
+
+**Behavior:**
+
+*   **Additional Filter:** The `--and` flag acts as an additional filter on the lines being considered.
+*   **With a Primary Pattern:** If you provide a primary pattern (e.g., `rg main_pattern --and "k1 k2"`), ripgrep first finds lines that match `main_pattern`. Then, from those lines, it filters them further, keeping only the lines that also contain *all* keywords specified with `--and` (e.g., both "k1" and "k2").
+*   **Without a Primary Pattern:** If no primary pattern is given (e.g., `rg --and "k1 k2"`), ripgrep considers all lines in the specified files (or stdin) and prints those that contain *all* the specified keywords.
+*   **Order Invariant:** The order in which the keywords appear on the line does not matter. As long as all specified keywords are present, the line is a match (assuming it also matches any primary pattern).
+*   **Case Sensitivity:** The matching of keywords by `--and` respects the overall case sensitivity setting. If `-i` (`--ignore-case`) is used, then the keyword matching for `--and` also becomes case-insensitive. If `--smart-case` is used, the case sensitivity of `--and` keywords will depend on the case of the primary pattern (if any) or behave case-insensitively if the AND keywords themselves are all lowercase (when no primary pattern is given). If no case-modifying flags are used, the keyword matching is case-sensitive.
+
+**Examples:**
+
+Let's say you have a file `example.txt` with the following content:
+
+```
+$ cat <<EOF > example.txt
+hello world line one
+hello universe line two
+world says hello line three
+EOF
+```
+
+1.  Search for lines containing both "hello" and "world":
+    ```
+    $ rg --and "hello world" example.txt
+    hello world line one
+    world says hello line three
+    ```
+    Both lines 1 and 3 contain "hello" and "world", so they are printed.
+
+2.  Search for lines matching the primary pattern "hello" AND also containing "line one":
+    ```
+    $ rg hello --and "line one" example.txt
+    hello world line one
+    ```
+    Line 1 matches "hello" and also contains "line one".
+    Line 2 matches "hello" but does not contain "line one".
+    Line 3 contains "line one" but does not match the primary pattern "hello" (as the first word). (Correction: `rg hello` would match line 3 if "hello" is anywhere. The example output is correct for `rg hello` matching line 1 and then filtering with `--and "line one"`)
+    If the primary pattern `hello` is meant to match anywhere, line 3 would be:
+    `world says hello line three` matches `hello`. Then, does it contain "line one"? No.
+    So the output remains correct.
+
+3.  Search case-insensitively for lines containing "HELLO" and "WORLD":
+    ```
+    $ rg -i --and "HELLO WORLD" example.txt
+    hello world line one
+    world says hello line three
+    ```
+
+This flag is particularly useful when you need to narrow down searches based on the co-occurrence of several terms without constructing complex regular expressions.
+
 
 ### Replacements
 

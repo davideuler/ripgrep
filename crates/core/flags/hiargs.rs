@@ -34,6 +34,7 @@ use crate::{
 /// level arguments aren't created until parsing has completely finished.
 #[derive(Debug)]
 pub(crate) struct HiArgs {
+    and_keyword_strings: Vec<String>,
     binary: BinaryDetection,
     boundary: Option<BoundaryMode>,
     buffer: BufferMode,
@@ -145,6 +146,16 @@ impl HiArgs {
         let binary = BinaryDetection::from_low_args(&state, &low);
         let colors = take_color_specs(&mut state, &mut low);
         let hyperlink_config = take_hyperlink_config(&mut state, &mut low)?;
+        let and_keyword_strings: Vec<String> =
+            if let Some(ref patterns_str) = low.and_patterns {
+                patterns_str
+                    .split_ascii_whitespace()
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            } else {
+                vec![]
+            };
         let stats = stats(&low);
         let types = types(&low)?;
         let globs = globs(&state, &low)?;
@@ -251,6 +262,7 @@ impl HiArgs {
             mode: low.mode,
             patterns,
             paths,
+            and_keyword_strings,
             binary,
             boundary: low.boundary,
             buffer: low.buffer,
@@ -624,6 +636,12 @@ impl HiArgs {
             .separator_path(self.path_separator.clone())
             .stats(self.stats.is_some())
             .trim_ascii(self.trim);
+        if !self.and_keyword_strings.is_empty() {
+            builder.and_keywords(
+                self.and_keyword_strings.clone(),
+                matches!(self.case, CaseMode::Insensitive),
+            );
+        }
         // When doing multi-threaded searching, the buffer writer is
         // responsible for writing separators since it is the only thing that
         // knows whether something has been printed or not. But for the single
