@@ -450,7 +450,7 @@ rg --and "keyword1 keyword2 keyword3" [path...]
 ```
 or with a primary pattern:
 ```
-rg main_pattern --and "keyword1 keyword2" [path...]
+rg --and keyword1 --and keyword2 --and keyword3 [path...]
 ```
 
 The keywords are provided as a single string, separated by spaces.
