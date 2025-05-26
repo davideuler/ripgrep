@@ -1141,15 +1141,13 @@ rgtest!(and_basic, |dir: Dir, mut cmd: TestCommand| {
 rgtest!(and_basic_no_match_one, |dir: Dir, mut cmd: TestCommand| {
     dir.create("f1.txt", "apple banana orange\napple grape");
     cmd.arg("--and").arg("apple").arg("--and").arg("mango").arg("f1.txt");
-    let expected = "";
-    eqnice!(expected, cmd.stdout());
+    cmd.assert_err();
 });
 
 rgtest!(and_basic_no_match_all, |dir: Dir, mut cmd: TestCommand| {
     dir.create("f1.txt", "apple banana orange\napple grape");
     cmd.arg("--and").arg("mango").arg("--and").arg("pear").arg("f1.txt");
-    let expected = "";
-    eqnice!(expected, cmd.stdout());
+    cmd.assert_err();
 });
 
 rgtest!(and_with_primary_pattern, |dir: Dir, mut cmd: TestCommand| {
@@ -1162,8 +1160,7 @@ rgtest!(and_with_primary_pattern, |dir: Dir, mut cmd: TestCommand| {
 rgtest!(and_with_primary_pattern_no_match_and, |dir: Dir, mut cmd: TestCommand| {
     dir.create("f1.txt", "red apple tasty\nblue apple sweet\ngreen banana yummy");
     cmd.arg("apple").arg("--and").arg("yummy").arg("f1.txt");
-    let expected = "";
-    eqnice!(expected, cmd.stdout());
+    cmd.assert_err();
 });
 
 rgtest!(and_case_insensitive, |dir: Dir, mut cmd: TestCommand| {
@@ -1176,8 +1173,7 @@ rgtest!(and_case_insensitive, |dir: Dir, mut cmd: TestCommand| {
 rgtest!(and_case_sensitive_mismatch, |dir: Dir, mut cmd: TestCommand| {
     dir.create("f1.txt", "Apple Banana Orange\napple banana");
     cmd.arg("--and").arg("apple").arg("--and").arg("BANANA").arg("f1.txt");
-    let expected = "";
-    eqnice!(expected, cmd.stdout());
+    cmd.assert_err();
 });
 
 rgtest!(and_empty_string_keywords, |dir: Dir, mut cmd: TestCommand| {
@@ -1204,8 +1200,7 @@ rgtest!(and_no_primary_pattern_only_and, |dir: Dir, mut cmd: TestCommand| {
 rgtest!(and_no_primary_pattern_only_and_no_match, |dir: Dir, mut cmd: TestCommand| {
     dir.create("f1.txt", "apple banana\napple only\nbanana only");
     cmd.arg("--and").arg("apple").arg("--and").arg("mango").arg("f1.txt");
-    let expected = "";
-    eqnice!(expected, cmd.stdout());
+    cmd.assert_err();
 });
 
 rgtest!(and_with_line_numbers, |dir: Dir, mut cmd: TestCommand| {
