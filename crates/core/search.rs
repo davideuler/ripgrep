@@ -9,7 +9,7 @@ search worker is where things like preprocessors or decompression happens.
 
 use std::{io, path::Path};
 
-use {grep::matcher::Matcher, termcolor::WriteColor};
+use {grep::matcher::Matcher, termcolor::WriteColor, grep::searcher::SinkMatch};
 
 /// The configuration for the search worker.
 ///
@@ -22,6 +22,8 @@ struct Config {
     search_zip: bool,
     binary_implicit: grep::searcher::BinaryDetection,
     binary_explicit: grep::searcher::BinaryDetection,
+    and_keywords: Vec<String>,
+    case_insensitive: bool,
 }
 
 impl Default for Config {
@@ -32,6 +34,8 @@ impl Default for Config {
             search_zip: false,
             binary_implicit: grep::searcher::BinaryDetection::none(),
             binary_explicit: grep::searcher::BinaryDetection::none(),
+            and_keywords: Vec::new(),
+            case_insensitive: false,
         }
     }
 }
@@ -160,6 +164,28 @@ impl SearchWorkerBuilder {
         detection: grep::searcher::BinaryDetection,
     ) -> &mut SearchWorkerBuilder {
         self.config.binary_explicit = detection;
+        self
+    }
+
+    /// Set the AND keywords that must all be present in a line for it to match.
+    ///
+    /// When AND keywords are set, only lines that contain all of the specified
+    /// keywords (in addition to matching the primary pattern) will be included
+    /// in the results.
+    pub(crate) fn and_keywords(
+        &mut self,
+        keywords: Vec<String>,
+    ) -> &mut SearchWorkerBuilder {
+        self.config.and_keywords = keywords;
+        self
+    }
+
+    /// Set whether the AND keyword matching should be case insensitive.
+    pub(crate) fn case_insensitive(
+        &mut self,
+        yes: bool,
+    ) -> &mut SearchWorkerBuilder {
+        self.config.case_insensitive = yes;
         self
     }
 }
@@ -342,9 +368,9 @@ impl<W: WriteColor> SearchWorker<W> {
 
         let (searcher, printer) = (&mut self.searcher, &mut self.printer);
         match self.matcher {
-            RustRegex(ref m) => search_path(m, searcher, printer, path),
+            RustRegex(ref m) => search_path(m, searcher, printer, path, &self.config),
             #[cfg(feature = "pcre2")]
-            PCRE2(ref m) => search_path(m, searcher, printer, path),
+            PCRE2(ref m) => search_path(m, searcher, printer, path, &self.config),
         }
     }
 
@@ -366,10 +392,106 @@ impl<W: WriteColor> SearchWorker<W> {
 
         let (searcher, printer) = (&mut self.searcher, &mut self.printer);
         match self.matcher {
-            RustRegex(ref m) => search_reader(m, searcher, printer, path, rdr),
+            RustRegex(ref m) => search_reader(m, searcher, printer, path, rdr, &self.config),
             #[cfg(feature = "pcre2")]
-            PCRE2(ref m) => search_reader(m, searcher, printer, path, rdr),
+            PCRE2(ref m) => search_reader(m, searcher, printer, path, rdr, &self.config),
         }
+    }
+}
+
+/// A sink wrapper that filters matches based on AND keywords.
+struct AndFilterSink<S> {
+    inner: S,
+    and_keywords: Vec<String>,
+    case_insensitive: bool,
+}
+
+impl<S> AndFilterSink<S> {
+    fn new(inner: S, and_keywords: Vec<String>, case_insensitive: bool) -> Self {
+        Self {
+            inner,
+            and_keywords,
+            case_insensitive,
+        }
+    }
+
+    fn line_contains_all_keywords(&self, line: &[u8]) -> bool {
+        if self.and_keywords.is_empty() {
+            return true;
+        }
+
+        let line_str = match std::str::from_utf8(line) {
+            Ok(s) => s,
+            Err(_) => return false, // Skip non-UTF8 lines
+        };
+
+        let line_to_check = if self.case_insensitive {
+            line_str.to_lowercase()
+        } else {
+            line_str.to_string()
+        };
+
+        for keyword in &self.and_keywords {
+            let keyword_to_check = if self.case_insensitive {
+                keyword.to_lowercase()
+            } else {
+                keyword.clone()
+            };
+
+            if !line_to_check.contains(&keyword_to_check) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl<S: grep::searcher::Sink> grep::searcher::Sink for AndFilterSink<S> {
+    type Error = S::Error;
+
+    fn matched(
+        &mut self,
+        searcher: &grep::searcher::Searcher,
+        mat: &SinkMatch<'_>,
+    ) -> Result<bool, Self::Error> {
+        // Check if the line contains all AND keywords
+        if !self.line_contains_all_keywords(mat.bytes()) {
+            return Ok(true); // Continue searching but don't report this match
+        }
+
+        // Forward to the inner sink if all keywords are present
+        self.inner.matched(searcher, mat)
+    }
+
+    fn context(
+        &mut self,
+        searcher: &grep::searcher::Searcher,
+        ctx: &grep::searcher::SinkContext<'_>,
+    ) -> Result<bool, Self::Error> {
+        self.inner.context(searcher, ctx)
+    }
+
+    fn context_break(
+        &mut self,
+        searcher: &grep::searcher::Searcher,
+    ) -> Result<bool, Self::Error> {
+        self.inner.context_break(searcher)
+    }
+
+    fn begin(
+        &mut self,
+        searcher: &grep::searcher::Searcher,
+    ) -> Result<bool, Self::Error> {
+        self.inner.begin(searcher)
+    }
+
+    fn finish(
+        &mut self,
+        searcher: &grep::searcher::Searcher,
+        finish: &grep::searcher::SinkFinish,
+    ) -> Result<(), Self::Error> {
+        self.inner.finish(searcher, finish)
     }
 }
 
@@ -380,30 +502,34 @@ fn search_path<M: Matcher, W: WriteColor>(
     searcher: &mut grep::searcher::Searcher,
     printer: &mut Printer<W>,
     path: &Path,
+    config: &Config,
 ) -> io::Result<SearchResult> {
     match *printer {
         Printer::Standard(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_path(&matcher, path, &mut sink)?;
+            let sink = p.sink_with_path(&matcher, path);
+            let mut and_sink = AndFilterSink::new(sink, config.and_keywords.clone(), config.case_insensitive);
+            searcher.search_path(&matcher, path, &mut and_sink)?;
             Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: sink.stats().map(|s| s.clone()),
+                has_match: and_sink.inner.has_match(),
+                stats: and_sink.inner.stats().map(|s| s.clone()),
             })
         }
         Printer::Summary(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_path(&matcher, path, &mut sink)?;
+            let sink = p.sink_with_path(&matcher, path);
+            let mut and_sink = AndFilterSink::new(sink, config.and_keywords.clone(), config.case_insensitive);
+            searcher.search_path(&matcher, path, &mut and_sink)?;
             Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: sink.stats().map(|s| s.clone()),
+                has_match: and_sink.inner.has_match(),
+                stats: and_sink.inner.stats().map(|s| s.clone()),
             })
         }
         Printer::JSON(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_path(&matcher, path, &mut sink)?;
+            let sink = p.sink_with_path(&matcher, path);
+            let mut and_sink = AndFilterSink::new(sink, config.and_keywords.clone(), config.case_insensitive);
+            searcher.search_path(&matcher, path, &mut and_sink)?;
             Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: Some(sink.stats().clone()),
+                has_match: and_sink.inner.has_match(),
+                stats: Some(and_sink.inner.stats().clone()),
             })
         }
     }
@@ -417,30 +543,34 @@ fn search_reader<M: Matcher, R: io::Read, W: WriteColor>(
     printer: &mut Printer<W>,
     path: &Path,
     mut rdr: R,
+    config: &Config,
 ) -> io::Result<SearchResult> {
     match *printer {
         Printer::Standard(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_reader(&matcher, &mut rdr, &mut sink)?;
+            let sink = p.sink_with_path(&matcher, path);
+            let mut and_sink = AndFilterSink::new(sink, config.and_keywords.clone(), config.case_insensitive);
+            searcher.search_reader(&matcher, &mut rdr, &mut and_sink)?;
             Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: sink.stats().map(|s| s.clone()),
+                has_match: and_sink.inner.has_match(),
+                stats: and_sink.inner.stats().map(|s| s.clone()),
             })
         }
         Printer::Summary(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_reader(&matcher, &mut rdr, &mut sink)?;
+            let sink = p.sink_with_path(&matcher, path);
+            let mut and_sink = AndFilterSink::new(sink, config.and_keywords.clone(), config.case_insensitive);
+            searcher.search_reader(&matcher, &mut rdr, &mut and_sink)?;
             Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: sink.stats().map(|s| s.clone()),
+                has_match: and_sink.inner.has_match(),
+                stats: and_sink.inner.stats().map(|s| s.clone()),
             })
         }
         Printer::JSON(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_reader(&matcher, &mut rdr, &mut sink)?;
+            let sink = p.sink_with_path(&matcher, path);
+            let mut and_sink = AndFilterSink::new(sink, config.and_keywords.clone(), config.case_insensitive);
+            searcher.search_reader(&matcher, &mut rdr, &mut and_sink)?;
             Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: Some(sink.stats().clone()),
+                has_match: and_sink.inner.has_match(),
+                stats: Some(and_sink.inner.stats().clone()),
             })
         }
     }

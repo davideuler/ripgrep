@@ -253,24 +253,39 @@ impl Flag for AndKeywords {
         "and"
     }
     fn doc_variable(&self) -> Option<&'static str> {
-        Some("KEYWORDS")
+        Some("KEYWORD")
     }
     fn doc_category(&self) -> Category {
         Category::Input
     }
     fn doc_short(&self) -> &'static str {
-        "Search for lines containing all space-separated KEYWORDS."
+        "Search for lines containing all specified keywords."
     }
     fn doc_long(&self) -> &'static str {
         r"
-Search for lines that contain all of the space-separated KEYWORDS. The order
-of keywords does not matter. This acts as an additional filter on top of any
-primary patterns specified.
+Search for lines that contain all of the specified keywords. This flag can be
+used multiple times to specify multiple keywords, or you can provide a single
+string with space-separated keywords. Each keyword is treated as a literal 
+string (not a regex). The order of keywords does not matter. This acts as an
+additional filter on top of any primary patterns specified.
+.sp
+For example:
+  rg --and apple --and banana --and orange
+  rg --and 'apple banana orange'
+.sp
+Both will find lines that contain all three words: apple, banana, and orange.
+The search is case-sensitive by default but respects the -i/--ignore-case flag.
 "
     }
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.and_patterns = Some(convert::string(v.unwrap_value())?);
+        let keyword = convert::string(v.unwrap_value())?;
+        if args.and_patterns.is_none() {
+            args.and_patterns = Some(keyword);
+        } else {
+            let existing = args.and_patterns.as_ref().unwrap();
+            args.and_patterns = Some(format!("{} {}", existing, keyword));
+        }
         Ok(())
     }
 }
@@ -281,14 +296,17 @@ fn test_and_keywords() {
     let args = parse_low_raw(None::<&str>).unwrap();
     assert_eq!(None, args.and_patterns);
 
-    let args = parse_low_raw(["--and", "foo bar"]).unwrap();
+    let args = parse_low_raw(["--and", "foo"]).unwrap();
+    assert_eq!(Some("foo".to_string()), args.and_patterns);
+
+    let args = parse_low_raw(["--and=foo"]).unwrap();
+    assert_eq!(Some("foo".to_string()), args.and_patterns);
+
+    let args = parse_low_raw(["--and", "foo", "--and", "bar"]).unwrap();
     assert_eq!(Some("foo bar".to_string()), args.and_patterns);
 
-    let args = parse_low_raw(["--and=foo bar"]).unwrap();
-    assert_eq!(Some("foo bar".to_string()), args.and_patterns);
-
-    let args = parse_low_raw(["--and", "foo bar", "--and", "baz quux"]).unwrap();
-    assert_eq!(Some("baz quux".to_string()), args.and_patterns);
+    let args = parse_low_raw(["--and", "apple", "--and", "banana", "--and", "orange"]).unwrap();
+    assert_eq!(Some("apple banana orange".to_string()), args.and_patterns);
 }
 
 /// --auto-hybrid-regex

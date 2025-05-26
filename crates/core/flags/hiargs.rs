@@ -712,7 +712,9 @@ impl HiArgs {
             .preprocessor_globs(self.pre_globs.clone())
             .search_zip(self.search_zip)
             .binary_detection_explicit(self.binary.explicit.clone())
-            .binary_detection_implicit(self.binary.implicit.clone());
+            .binary_detection_implicit(self.binary.implicit.clone())
+            .and_keywords(self.and_keyword_strings.clone())
+            .case_insensitive(matches!(self.case, CaseMode::Insensitive));
         Ok(builder.build(matcher, searcher, printer))
     }
 
@@ -1003,6 +1005,12 @@ impl Patterns {
         // If we got nothing from -e/--regexp and -f/--file, then the first
         // positional is a pattern.
         if low.patterns.is_empty() {
+            // If we have --and patterns but no primary pattern, we can use a
+            // match-all pattern that will be filtered by the --and logic
+            if low.and_patterns.is_some() {
+                // Use a match-all pattern when --and is specified
+                return Ok(Patterns { patterns: vec![".*".to_string()] });
+            }
             anyhow::ensure!(
                 !low.positional.is_empty(),
                 "ripgrep requires at least one pattern to execute a search"
