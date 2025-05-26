@@ -1129,95 +1129,292 @@ rgtest!(sortr_accessed, |dir: Dir, mut cmd: TestCommand| {
     eqnice!(expected, cmd.args(["--sortr", "accessed", "test"]).stdout());
 });
 
-// Tests for --and flag
+// --- Tests for the --and flag ---
 
-rgtest!(and_basic, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "apple banana orange\napple grape");
-    cmd.arg("--and").arg("apple banana").arg("f1.txt");
-    let expected = "apple banana orange\n";
-    eqnice!(expected, cmd.stdout());
+rgtest!(and_basic_multiple_flags, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("file.txt", "this is a list of installed packages");
+    cmd.arg("--and").arg("list")
+        .arg("--and").arg("installed")
+        .arg("--and").arg("packages")
+        .arg("file.txt");
+    eqnice!("this is a list of installed packages\n", cmd.stdout());
+
+    let mut cmd2 = workdir_command!(&dir, "rg");
+    cmd2.arg("--and").arg("list")
+        .arg("--and").arg("installed")
+        .arg("--and").arg("foobar")
+        .arg("file.txt");
+    assert_eq!("", cmd2.stdout());
+
+    let mut cmd3 = workdir_command!(&dir, "rg");
+    cmd3.arg("-i")
+        .arg("--and").arg("LIST")
+        .arg("--and").arg("INSTALLED")
+        .arg("--and").arg("PACKAGES")
+        .arg("file.txt");
+    eqnice!("this is a list of installed packages\n", cmd3.stdout());
 });
 
-rgtest!(and_basic_no_match_one, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "apple banana orange\napple grape");
-    cmd.arg("--and").arg("apple mango").arg("f1.txt");
-    let expected = "";
-    eqnice!(expected, cmd.stdout());
+rgtest!(and_basic_single_flag_space_separated, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("file.txt", "list installed packages");
+    cmd.arg("--and").arg("list installed packages").arg("file.txt");
+    eqnice!("list installed packages\n", cmd.stdout());
+
+    let mut cmd2 = workdir_command!(&dir, "rg");
+    cmd2.arg("--and").arg("list packages installed").arg("file.txt"); // Order should not matter for split
+    eqnice!("list installed packages\n", cmd2.stdout());
+
+    let mut cmd3 = workdir_command!(&dir, "rg");
+    cmd3.arg("--and").arg("list installed foobar").arg("file.txt");
+    assert_eq!("", cmd3.stdout());
+
+    let mut cmd4 = workdir_command!(&dir, "rg");
+    cmd4.arg("-i").arg("--and").arg("LIST INSTALLED").arg("file.txt");
+    eqnice!("list installed packages\n", cmd4.stdout());
 });
 
-rgtest!(and_basic_no_match_all, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "apple banana orange\napple grape");
-    cmd.arg("--and").arg("mango pear").arg("f1.txt");
-    let expected = "";
-    eqnice!(expected, cmd.stdout());
+rgtest!(and_ordered_single_flag_regex, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("file1.txt", "first list then installed then packages");
+    cmd.arg("--and").arg("list.*installed.*packages").arg("file1.txt");
+    eqnice!("first list then installed then packages\n", cmd.stdout());
+
+    let mut cmd2 = workdir_command!(&dir, "rg");
+    dir.create("file2.txt", "first installed then list then packages");
+    cmd2.arg("--and").arg("list.*installed.*packages").arg("file2.txt");
+    assert_eq!("", cmd2.stdout());
 });
 
-rgtest!(and_with_primary_pattern, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "red apple tasty\nblue apple sweet\ngreen banana yummy");
-    cmd.arg("apple").arg("--and").arg("tasty red").arg("f1.txt");
-    let expected = "red apple tasty\n";
-    eqnice!(expected, cmd.stdout());
+rgtest!(and_interaction_with_main_pattern, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("file.txt", "main_keyword and_keyword1 and_keyword2");
+    cmd.arg("main_keyword")
+        .arg("--and").arg("and_keyword1")
+        .arg("--and").arg("and_keyword2")
+        .arg("file.txt");
+    eqnice!("main_keyword and_keyword1 and_keyword2\n", cmd.stdout());
+
+    let mut cmd2 = workdir_command!(&dir, "rg");
+    cmd2.arg("main_keyword")
+        .arg("--and").arg("and_keyword1")
+        .arg("--and").arg("foobar")
+        .arg("file.txt");
+    assert_eq!("", cmd2.stdout());
+
+    let mut cmd3 = workdir_command!(&dir, "rg");
+    cmd3.arg("nomain_keyword")
+        .arg("--and").arg("and_keyword1")
+        .arg("--and").arg("and_keyword2")
+        .arg("file.txt");
+    assert_eq!("", cmd3.stdout());
+    
+    let mut cmd4 = workdir_command!(&dir, "rg");
+    cmd4.arg("main_keyword")
+        .arg("--and").arg("and_keyword1 and_keyword2") // Space separated
+        .arg("file.txt");
+    eqnice!("main_keyword and_keyword1 and_keyword2\n", cmd4.stdout());
 });
 
-rgtest!(and_with_primary_pattern_no_match_and, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "red apple tasty\nblue apple sweet\ngreen banana yummy");
-    cmd.arg("apple").arg("--and").arg("yummy").arg("f1.txt");
-    let expected = "";
-    eqnice!(expected, cmd.stdout());
+rgtest!(and_interaction_with_word_boundaries, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("file1.txt", "list of installed packages");
+    cmd.arg("-w")
+        .arg("--and").arg("list")
+        .arg("--and").arg("installed")
+        .arg("file1.txt");
+    eqnice!("list of installed packages\n", cmd.stdout());
+
+    let mut cmd2 = workdir_command!(&dir, "rg");
+    dir.create("file2.txt", "listing of installed_things packages");
+    cmd2.arg("-w") // -w applies to main pattern implicitly (all lines) and AND patterns
+        .arg("--and").arg("list")
+        .arg("--and").arg("installed")
+        .arg("file2.txt");
+    assert_eq!("", cmd2.stdout());
+        
+    let mut cmd3 = workdir_command!(&dir, "rg");
+    cmd3.arg("-w")
+        .arg("--and").arg("list installed") // Space separated
+        .arg("file1.txt");
+    eqnice!("list of installed packages\n", cmd3.stdout());
+
+    let mut cmd4 = workdir_command!(&dir, "rg");
+    // Test that -w on main pattern also applies to AND patterns
+    cmd4.arg("-w").arg("listing") 
+        .arg("--and").arg("installed")
+        .arg("file2.txt");
+    assert_eq!("", cmd4.stdout()); // "listing" matches, but "installed" (as whole word) does not match "installed_things"
+    
+    let mut cmd5 = workdir_command!(&dir, "rg");
+    cmd5.arg("-w").arg("packages") // main pattern
+        .arg("--and").arg("list")
+        .arg("--and").arg("installed_things")
+        .arg("file2.txt");
+    // "packages" matches, "list" (from listing) does not, "installed_things" matches
+    assert_eq!("", cmd5.stdout());
+
+    let mut cmd6 = workdir_command!(&dir, "rg");
+    dir.create("file3.txt", "list installed_things packages");
+    cmd6.arg("-w").arg("packages")
+        .arg("--and").arg("list") // matches "list"
+        .arg("--and").arg("installed_things") // matches "installed_things"
+        .arg("file3.txt");
+    eqnice!("list installed_things packages\n", cmd6.stdout());
 });
 
-rgtest!(and_case_insensitive, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "Apple Banana Orange\napple grape");
-    cmd.arg("-i").arg("--and").arg("apple BANANA").arg("f1.txt");
-    let expected = "Apple Banana Orange\n";
-    eqnice!(expected, cmd.stdout());
+rgtest!(and_interaction_with_fixed_strings, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("file1.txt", "list.*packages and list.packages");
+    // Case 1: -F makes --and pattern literal
+    cmd.arg("-F")
+       .arg("--and").arg("list.*packages") // This should be literal due to -F on main
+       .arg("file1.txt");
+    eqnice!("list.*packages and list.packages\n", cmd.stdout());
+
+    let mut cmd2 = workdir_command!(&dir, "rg");
+    // Case 2: --and pattern is regex by default
+    cmd2.arg("--and").arg("list.*packages")
+        .arg("file1.txt");
+    eqnice!("list.*packages and list.packages\n", cmd2.stdout());
+
+    let mut cmd3 = workdir_command!(&dir, "rg");
+    dir.create("file2.txt", "listXpackages and list.packages");
+    // Case 3: -F makes --and pattern literal
+    cmd3.arg("-F")
+        .arg("--and").arg("list.packages")
+        .arg("file2.txt");
+    eqnice!("listXpackages and list.packages\n", cmd3.stdout());
+    
+    let mut cmd4 = workdir_command!(&dir, "rg");
+    // Case 4: --and pattern as regex matches listXpackages
+    cmd4.arg("--and").arg("list.packages") 
+        .arg("file2.txt");
+    eqnice!("listXpackages and list.packages\n", cmd4.stdout());
 });
 
-rgtest!(and_case_sensitive_mismatch, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "Apple Banana Orange\napple banana");
-    cmd.arg("--and").arg("apple BANANA").arg("f1.txt");
-    let expected = "";
+
+rgtest!(and_interaction_with_invert_match, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("file.txt", "match one two\nno_match one three\nalso_no_match two four");
+    cmd.arg("-v")
+       .arg("--and").arg("one")
+       .arg("--and").arg("two")
+       .arg("file.txt");
+    // Expected: lines that DO NOT (contain "one" AND "two")
+    let expected = "\
+no_match one three
+also_no_match two four
+";
     eqnice!(expected, cmd.stdout());
+
+    let mut cmd2 = workdir_command!(&dir, "rg");
+    cmd2.arg("match") // Main pattern
+        .arg("-v")
+        .arg("--and").arg("one")
+        // .arg("--and").arg("two") // Intentionally removed to simplify: match AND (NOT (one))
+        .arg("file.txt");
+    // Expected: lines that (contain "match") AND NOT (contain "one")
+    // "match one two" -> no, because (match AND one) is true, so NOT (one) is false.
+    // "no_match one three" -> no, because does not contain "match"
+    // "also_no_match two four" -> no, because does not contain "match"
+    // Let's add a better case:
+    dir.create("file_v2.txt", "main_present one_absent\nmain_present one_present\nmain_absent one_present");
+    let mut cmd3 = workdir_command!(&dir, "rg");
+    cmd3.arg("main_present")
+        .arg("-v")
+        .arg("--and").arg("one_present")
+        .arg("file_v2.txt");
+    // Expected: lines that (match "main_present") AND (do NOT match "one_present")
+    eqnice!("main_present one_absent\n", cmd3.stdout());
 });
 
-rgtest!(and_empty_string_keywords, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "line one\nline two");
-    cmd.arg("--and").arg("").arg("f1.txt");
-    let expected = "line one\nline two\n";
-    eqnice!(expected, cmd.stdout());
+rgtest!(and_with_patterns_from_file, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("and_patterns.txt", "installed\npackages");
+    dir.create("data.txt", "a list of installed packages\na list of available packages");
+    cmd.arg("--and").arg("list")
+       .arg("-f").arg(dir.path().join("and_patterns.txt"))
+       .arg(dir.path().join("data.txt"));
+    eqnice!("a list of installed packages\n", cmd.stdout());
+
+    let mut cmd2 = workdir_command!(&dir, "rg");
+    dir.create("and_patterns_ws.txt", "installed packages\nlist");
+    cmd2.arg("--and").arg("-f").arg(dir.path().join("and_patterns_ws.txt"))
+        .arg(dir.path().join("data.txt"));
+    // "installed packages" is one pattern, "list" is another.
+    // "a list of installed packages" matches both.
+    eqnice!("a list of installed packages\n", cmd2.stdout());
 });
 
-rgtest!(and_keywords_with_internal_spaces_as_separate, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "key1 then part2 and key3\nkey1 part2");
-    cmd.arg("--and").arg("key1 part2 key3").arg("f1.txt");
-    let expected = "key1 then part2 and key3\n";
-    eqnice!(expected, cmd.stdout());
+rgtest!(and_edge_cases, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("file.txt", "this is a list of packages\nthis is a lOst of items");
+    // No main pattern
+    cmd.arg("--and").arg("list")
+       .arg("--and").arg("packages")
+       .arg("file.txt");
+    eqnice!("this is a list of packages\n", cmd.stdout());
+
+    // Empty --and pattern string (direct) - current behavior is that it's ignored.
+    // If it were an error, the test setup would need to change.
+    // If it means "match nothing additional", that's fine.
+    // If it means "match empty string", it matches all lines that passed main pattern.
+    // Current rg behavior for empty pattern (e.g. rg "") is to match every line.
+    // So --and "" might mean "this AND pattern always matches".
+    let mut cmd2 = workdir_command!(&dir, "rg");
+    cmd2.arg("list") // main pattern
+        .arg("--and").arg("") // This gets split by whitespace, resulting in no patterns if it was just ""
+        .arg("file.txt");
+    // If "" becomes no patterns, then it's just like `rg list file.txt`
+    // If "" becomes a pattern that matches empty string, it's also like `rg list file.txt`
+    // because an empty string is in every line.
+    // The split_whitespace() on empty string yields no items. So no AND patterns are added.
+    eqnice!("this is a list of packages\n", cmd2.stdout());
+
+    // Empty --and pattern string (from file)
+    dir.create("empty_pattern.txt", "\nlist"); // First line empty
+    let mut cmd3 = workdir_command!(&dir, "rg");
+    cmd3.arg("packages")
+        .arg("--and").arg("-f").arg(dir.path().join("empty_pattern.txt"))
+        .arg("file.txt");
+    // Empty line in pattern file usually means "match every line".
+    // So this means: (packages) AND (match every line) AND (list)
+    eqnice!("this is a list of packages\n", cmd3.stdout());
+
+    // Complex regex
+    let mut cmd4 = workdir_command!(&dir, "rg");
+    cmd4.arg("--and").arg("l[io]st")
+        .arg("--and").arg("items")
+        .arg("file.txt");
+    eqnice!("this is a lOst of items\n", cmd4.stdout());
 });
 
-rgtest!(and_no_primary_pattern_only_and, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "apple banana\napple only\nbanana only");
-    cmd.arg("--and").arg("apple banana").arg("f1.txt");
-    let expected = "apple banana\n";
+rgtest!(and_interaction_with_context, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("file.txt", "line1: keyword apple\nline2: context for apple\nline3: keyword banana\nline4: context for banana orange\nline5: keyword apple orange");
+    cmd.arg("keyword")
+       .arg("--and").arg("apple")
+       .arg("-C").arg("1")
+       .arg("file.txt");
+    let expected = "\
+line1: keyword apple
+line2: context for apple
+--
+line4: context for banana orange
+line5: keyword apple orange
+";
+    // line2 is context for line1 (apple)
+    // line4 is context for line5 (apple)
+    // line3 (banana) is not printed because its context (line4) does not contain apple.
+    // line4 itself matches "orange" (if it were an AND) but not "apple" as an AND for itself.
+    // The context lines must also satisfy the AND conditions.
     eqnice!(expected, cmd.stdout());
-});
 
-rgtest!(and_no_primary_pattern_only_and_no_match, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "apple banana\napple only\nbanana only");
-    cmd.arg("--and").arg("apple mango").arg("f1.txt");
-    let expected = "";
-    eqnice!(expected, cmd.stdout());
-});
-
-rgtest!(and_with_line_numbers, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "hello world\nworld is round\nhello again");
-    cmd.arg("-n").arg("--and").arg("hello world").arg("f1.txt");
-    let expected = "1:hello world\n";
-    eqnice!(expected, cmd.stdout());
-});
-
-rgtest!(and_with_primary_and_line_numbers, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("f1.txt", "alpha beta gamma del\ndelta beta alpha eps\nalpha zeta");
-    cmd.arg("-n").arg("beta").arg("--and").arg("alpha eps").arg("f1.txt");
-    let expected = "2:delta beta alpha eps\n";
-    eqnice!(expected, cmd.stdout());
+    let mut cmd2 = workdir_command!(&dir, "rg");
+    cmd2.arg("keyword")
+       .arg("--and").arg("orange")
+       .arg("-C").arg("1")
+       .arg("file.txt");
+    let expected2 = "\
+line3: keyword banana
+line4: context for banana orange
+line5: keyword apple orange
+";
+    // line1 (apple) is not printed because its context (line2) does not contain orange.
+    // line3 (banana) its context line4 contains orange. line3 itself does not contain orange.
+    // line4 is context for line3 and line5. line4 contains orange.
+    // line5 contains orange.
+    eqnice!(expected2, cmd2.stdout());
 });

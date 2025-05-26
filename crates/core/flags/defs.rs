@@ -46,7 +46,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     // same category.
     &Regexp,
     &File,
-    &AndKeywords,
+    &And,
     &AfterContext,
     &BeforeContext,
     &Binary,
@@ -152,6 +152,85 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &SortFiles,
 ];
 
+/// --and
+#[derive(Debug)]
+struct And;
+
+impl Flag for And {
+    fn is_switch(&self) -> bool {
+        false
+    }
+    fn name_short(&self) -> Option<u8> {
+        None
+    }
+    fn name_long(&self) -> &'static str {
+        "and"
+    }
+    fn doc_variable(&self) -> Option<&'static str> {
+        Some("PATTERN")
+    }
+    fn doc_category(&self) -> Category {
+        Category::Input
+    }
+    fn doc_short(&self) -> &'static str {
+        "An additional pattern that must match."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+An additional pattern that must also match for a line to be printed.
+This flag can be specified multiple times.
+.sp
+Logically, this flag is equivalent to chaining multiple ripgrep commands with a
+pipe, but may be more performant.
+"
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        let pattern = convert::string(v.unwrap_value())?;
+        args.and_patterns.push(PatternSource::Regexp(pattern));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_and() {
+    let args = parse_low_raw(None::<&str>).unwrap();
+    assert_eq!(Vec::<PatternSource>::new(), args.and_patterns);
+
+    let args = parse_low_raw(["--and", "foo"]).unwrap();
+    assert_eq!(
+        vec![PatternSource::Regexp("foo".to_string())],
+        args.and_patterns
+    );
+
+    let args = parse_low_raw(["--and=foo"]).unwrap();
+    assert_eq!(
+        vec![PatternSource::Regexp("foo".to_string())],
+        args.and_patterns
+    );
+
+    let args = parse_low_raw(["--and", "foo", "--and", "bar"]).unwrap();
+    assert_eq!(
+        vec![
+            PatternSource::Regexp("foo".to_string()),
+            PatternSource::Regexp("bar".to_string())
+        ],
+        args.and_patterns
+    );
+
+    // Ensure it interacts correctly with main patterns
+    let args = parse_low_raw(["main_pattern", "--and", "and_pattern"]).unwrap();
+    assert_eq!(
+        vec![PatternSource::Regexp("main_pattern".to_string())],
+        args.patterns
+    );
+    assert_eq!(
+        vec![PatternSource::Regexp("and_pattern".to_string())],
+        args.and_patterns
+    );
+}
+
 /// -A/--after-context
 #[derive(Debug)]
 struct AfterContext;
@@ -236,59 +315,6 @@ fn test_after_context() {
         let result = parse_low_raw(["--after-context", n.as_str()]);
         assert!(result.is_err(), "{result:?}");
     }
-}
-
-/// --and
-#[derive(Debug)]
-struct AndKeywords;
-
-impl Flag for AndKeywords {
-    fn is_switch(&self) -> bool {
-        false
-    }
-    fn name_short(&self) -> Option<u8> {
-        None
-    }
-    fn name_long(&self) -> &'static str {
-        "and"
-    }
-    fn doc_variable(&self) -> Option<&'static str> {
-        Some("KEYWORDS")
-    }
-    fn doc_category(&self) -> Category {
-        Category::Input
-    }
-    fn doc_short(&self) -> &'static str {
-        "Search for lines containing all space-separated KEYWORDS."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
-Search for lines that contain all of the space-separated KEYWORDS. The order
-of keywords does not matter. This acts as an additional filter on top of any
-primary patterns specified.
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        args.and_patterns = Some(convert::string(v.unwrap_value())?);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn test_and_keywords() {
-    let args = parse_low_raw(None::<&str>).unwrap();
-    assert_eq!(None, args.and_patterns);
-
-    let args = parse_low_raw(["--and", "foo bar"]).unwrap();
-    assert_eq!(Some("foo bar".to_string()), args.and_patterns);
-
-    let args = parse_low_raw(["--and=foo bar"]).unwrap();
-    assert_eq!(Some("foo bar".to_string()), args.and_patterns);
-
-    let args = parse_low_raw(["--and", "foo bar", "--and", "baz quux"]).unwrap();
-    assert_eq!(Some("baz quux".to_string()), args.and_patterns);
 }
 
 /// --auto-hybrid-regex

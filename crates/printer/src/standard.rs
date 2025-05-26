@@ -35,8 +35,6 @@ use crate::{
 /// and cannot changed.
 #[derive(Debug, Clone)]
 struct Config {
-    and_keywords: std::sync::Arc<Vec<String>>,
-    and_keywords_case_insensitive: bool,
     colors: ColorSpecs,
     hyperlink: HyperlinkConfig,
     stats: bool,
@@ -58,13 +56,12 @@ struct Config {
     separator_field_context: Arc<Vec<u8>>,
     separator_path: Option<u8>,
     path_terminator: Option<u8>,
+    compiled_and_patterns: Arc<Vec<crate::search::PatternMatcher>>,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config {
-            and_keywords: Arc::new(vec![]),
-            and_keywords_case_insensitive: false,
             colors: ColorSpecs::default(),
             hyperlink: HyperlinkConfig::default(),
             stats: false,
@@ -86,6 +83,7 @@ impl Default for Config {
             separator_field_context: Arc::new(b"-".to_vec()),
             separator_path: None,
             path_terminator: None,
+            compiled_and_patterns: Arc::new(vec![]),
         }
     }
 }
@@ -479,16 +477,14 @@ impl StandardBuilder {
         self
     }
 
-    /// Sets the keywords for "AND" logic and whether matching should be case-insensitive.
-    ///
-    /// If `keywords` is empty, this configuration will effectively be a no-op.
-    pub fn and_keywords(
+    /// Sets the compiled "AND" patterns.
+    /// These patterns must all match a line for it to be considered a true match,
+    /// in addition to the main pattern.
+    pub fn compiled_and_patterns(
         &mut self,
-        keywords: Vec<String>,
-        case_insensitive: bool,
+        compiled_and_patterns: Vec<crate::search::PatternMatcher>,
     ) -> &mut StandardBuilder {
-        self.config.and_keywords = Arc::new(keywords);
-        self.config.and_keywords_case_insensitive = case_insensitive;
+        self.config.compiled_and_patterns = Arc::new(compiled_and_patterns);
         self
     }
 }
@@ -511,41 +507,6 @@ pub struct Standard<W> {
     config: Config,
     wtr: RefCell<CounterWriter<W>>,
     matches: Vec<Match>,
-}
-
-/// Checks if a given line contains all specified keywords.
-///
-/// - `line_bytes`: The byte slice of the line to check.
-/// - `keywords`: A slice of `String` keywords to search for.
-/// - `case_insensitive`: If true, the comparison is case-insensitive.
-///
-/// Returns `true` if all keywords are found in the line (or if keywords is empty),
-/// `false` otherwise.
-fn line_passes_and_filter(
-    line_bytes: &[u8],
-    keywords: &[String],
-    case_insensitive: bool,
-) -> bool {
-    if keywords.is_empty() {
-        return true;
-    }
-    let line_cow = String::from_utf8_lossy(line_bytes);
-
-    if case_insensitive {
-        let line_lower = line_cow.to_lowercase();
-        for keyword in keywords {
-            if !line_lower.contains(&keyword.to_lowercase()) {
-                return false;
-            }
-        }
-    } else {
-        for keyword in keywords {
-            if !line_cow.contains(keyword) {
-                return false;
-            }
-        }
-    }
-    true
 }
 
 impl<W: WriteColor> Standard<W> {
@@ -864,30 +825,33 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
         searcher: &Searcher,
         mat: &SinkMatch<'_>,
     ) -> Result<bool, io::Error> {
-        // Perform AND filter check first.
-        if !self.standard.config.and_keywords.is_empty() {
-            let line_content = mat.buffer().get(mat.bytes_range_in_buffer()).unwrap_or_default();
-            if !line_passes_and_filter(
-                line_content,
-                &self.standard.config.and_keywords,
-                self.standard.config.and_keywords_case_insensitive,
-            ) {
-                // AND filter failed. This match should not be processed further for printing.
-                // Return Ok(true) to indicate that searching should continue,
-                // but this specific match is skipped.
-                return Ok(true);
+        self.match_count += 1;
+
+        // Apply AND pattern filtering.
+        if !self.standard.config.compiled_and_patterns.is_empty() {
+            let line_bytes = mat.buffer().get(mat.bytes_range_in_buffer().clone()).unwrap_or_default();
+            let mut all_and_matched = true;
+            for and_matcher in self.standard.config.compiled_and_patterns.iter() {
+                if !and_matcher.is_match(line_bytes)? {
+                    all_and_matched = false;
+                    break;
+                }
+            }
+            if !all_and_matched {
+                // If not all AND patterns matched, we still processed a line from the
+                // main matcher's perspective. So, we might need to adjust after_context_remaining
+                // if we were in that state from a *previous* fully successful match.
+                // This effectively treats the current "main match" as a line that fills
+                // an after-context slot but isn't printed itself.
+                if self.after_context_remaining > 0 {
+                    self.after_context_remaining = self.after_context_remaining.saturating_sub(1);
+                }
+                // We've already incremented self.match_count for the main pattern.
+                // Return true to continue searching the current file, but skip printing this match.
+                return Ok(!self.should_quit());
             }
         }
-
-        // If AND filter passed (or no AND keywords), proceed.
-        self.match_count += 1;
-        // When we've exceeded our match count, then the remaining context
-        // lines should not be reset, but instead, decremented. This avoids a
-        // bug where we display more matches than a configured limit. The main
-        // idea here is that 'matched' might be called again while printing
-        // an after-context line. In that case, we should treat this as a
-        // contextual line rather than a matching line for the purposes of
-        // termination.
+        
         if self.match_more_than_limit() {
             self.after_context_remaining =
                 self.after_context_remaining.saturating_sub(1);
@@ -921,6 +885,28 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
         searcher: &Searcher,
         ctx: &SinkContext<'_>,
     ) -> Result<bool, io::Error> {
+        // Apply AND pattern filtering to context lines as well.
+        if !self.standard.config.compiled_and_patterns.is_empty() {
+            let line_bytes = ctx.bytes();
+            let mut all_and_matched = true;
+            for and_matcher in self.standard.config.compiled_and_patterns.iter() {
+                if !and_matcher.is_match(line_bytes)? {
+                    all_and_matched = false;
+                    break;
+                }
+            }
+            if !all_and_matched {
+                // If an AND pattern doesn't match the context line, skip printing it.
+                // Adjust after_context_remaining if necessary.
+                if ctx.kind() == &SinkContextKind::After && self.after_context_remaining > 0 {
+                    self.after_context_remaining =
+                        self.after_context_remaining.saturating_sub(1);
+                }
+                // Return true to continue searching/processing, but this context line won't be printed.
+                return Ok(!self.should_quit());
+            }
+        }
+
         self.standard.matches.clear();
         self.replacer.clear();
 

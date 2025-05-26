@@ -36,8 +36,8 @@ pub(crate) struct LowArgs {
     pub(crate) mode: Mode,
     pub(crate) positional: Vec<OsString>,
     pub(crate) patterns: Vec<PatternSource>,
+    pub(crate) and_patterns: Vec<PatternSource>,
     // Everything else, sorted lexicographically.
-    pub(crate) and_patterns: Option<String>,
     pub(crate) binary: BinaryMode,
     pub(crate) boundary: Option<BoundaryMode>,
     pub(crate) buffer: BufferMode,

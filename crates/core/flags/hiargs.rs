@@ -34,7 +34,6 @@ use crate::{
 /// level arguments aren't created until parsing has completely finished.
 #[derive(Debug)]
 pub(crate) struct HiArgs {
-    and_keyword_strings: Vec<String>,
     binary: BinaryDetection,
     boundary: Option<BoundaryMode>,
     buffer: BufferMode,
@@ -88,6 +87,8 @@ pub(crate) struct HiArgs {
     paths: Paths,
     path_terminator: Option<u8>,
     patterns: Patterns,
+    and_patterns: Vec<String>, // Will be used to create compiled_and_patterns
+    compiled_and_patterns: Vec<PatternMatcher>,
     pre: Option<PathBuf>,
     pre_globs: ignore::overrides::Override,
     quiet: bool,
@@ -141,21 +142,13 @@ impl HiArgs {
 
         let mut state = State::new()?;
         let patterns = Patterns::from_low_args(&mut state, &mut low)?;
+        let and_pattern_strings = process_and_patterns(&mut state, &mut low)?;
+        let compiled_and_patterns = HiArgs::compile_patterns(&low, &and_pattern_strings)?;
         let paths = Paths::from_low_args(&mut state, &patterns, &mut low)?;
 
         let binary = BinaryDetection::from_low_args(&state, &low);
         let colors = take_color_specs(&mut state, &mut low);
         let hyperlink_config = take_hyperlink_config(&mut state, &mut low)?;
-        let and_keyword_strings: Vec<String> =
-            if let Some(ref patterns_str) = low.and_patterns {
-                patterns_str
-                    .split_ascii_whitespace()
-                    .map(|s| s.to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            } else {
-                vec![]
-            };
         let stats = stats(&low);
         let types = types(&low)?;
         let globs = globs(&state, &low)?;
@@ -261,8 +254,9 @@ impl HiArgs {
         Ok(HiArgs {
             mode: low.mode,
             patterns,
+            and_patterns: and_pattern_strings, // Keep the strings for now, maybe useful for debugging or other features
+            compiled_and_patterns,
             paths,
-            and_keyword_strings,
             binary,
             boundary: low.boundary,
             buffer: low.buffer,
@@ -376,84 +370,164 @@ impl HiArgs {
     /// If there was a problem building the matcher (e.g., a syntax error),
     /// then this returns an error.
     pub(crate) fn matcher(&self) -> anyhow::Result<PatternMatcher> {
-        match self.engine {
-            EngineChoice::Default => match self.matcher_rust() {
-                Ok(m) => Ok(m),
-                Err(err) => {
-                    anyhow::bail!(suggest_other_engine(err.to_string()));
+        HiArgs::compile_matcher_for_engine(
+            self.engine,
+            &self.patterns.patterns,
+            self.fixed_strings,
+            self.case,
+            self.boundary,
+            self.no_unicode,
+            self.multiline,
+            self.multiline_dotall,
+            self.crlf,
+            self.null_data,
+            self.regex_size_limit,
+            self.dfa_size_limit,
+            &self.binary,
+        )
+    }
+
+    /// Helper function to compile a list of patterns into a PatternMatcher
+    /// based on the given engine and settings.
+    fn compile_matcher_for_engine(
+        engine: EngineChoice,
+        patterns: &[String],
+        fixed_strings: bool,
+        case_mode: CaseMode,
+        boundary: Option<BoundaryMode>,
+        no_unicode: bool,
+        multiline: bool,
+        multiline_dotall: bool,
+        crlf: bool,
+        null_data: bool,
+        regex_size_limit: Option<usize>,
+        dfa_size_limit: Option<usize>,
+        binary_detection: &BinaryDetection,
+    ) -> anyhow::Result<PatternMatcher> {
+        match engine {
+            EngineChoice::Default => {
+                match HiArgs::matcher_rust_build(
+                    patterns,
+                    fixed_strings,
+                    case_mode,
+                    boundary,
+                    no_unicode,
+                    multiline,
+                    multiline_dotall,
+                    crlf,
+                    null_data,
+                    regex_size_limit,
+                    dfa_size_limit,
+                    binary_detection,
+                ) {
+                    Ok(m) => Ok(m),
+                    Err(err) => {
+                        anyhow::bail!(suggest_other_engine(err.to_string()));
+                    }
                 }
-            },
-            EngineChoice::PCRE2 => Ok(self.matcher_pcre2()?),
+            }
+            EngineChoice::PCRE2 => HiArgs::matcher_pcre2_build(
+                patterns,
+                fixed_strings,
+                case_mode,
+                boundary,
+                no_unicode,
+                multiline,
+                multiline_dotall,
+                crlf,
+            ),
             EngineChoice::Auto => {
-                let rust_err = match self.matcher_rust() {
+                 let rust_err = match HiArgs::matcher_rust_build(
+                    patterns,
+                    fixed_strings,
+                    case_mode,
+                    boundary,
+                    no_unicode,
+                    multiline,
+                    multiline_dotall,
+                    crlf,
+                    null_data,
+                    regex_size_limit,
+                    dfa_size_limit,
+                    binary_detection,
+                ) {
                     Ok(m) => return Ok(m),
                     Err(err) => err,
                 };
                 log::debug!(
-                    "error building Rust regex in hybrid mode:\n{rust_err}",
+                    "error building Rust regex in hybrid mode for patterns {:?}:\n{rust_err}",
+                    patterns
                 );
 
-                let pcre_err = match self.matcher_pcre2() {
+                let pcre_err = match HiArgs::matcher_pcre2_build(
+                    patterns,
+                    fixed_strings,
+                    case_mode,
+                    boundary,
+                    no_unicode,
+                    multiline,
+                    multiline_dotall,
+                    crlf,
+                ) {
                     Ok(m) => return Ok(m),
                     Err(err) => err,
                 };
                 let divider = "~".repeat(79);
                 anyhow::bail!(
                     "regex could not be compiled with either the default \
-                     regex engine or with PCRE2.\n\n\
+                     regex engine or with PCRE2 for patterns {:?}.\n\n\
                      default regex engine error:\n\
                      {divider}\n\
                      {rust_err}\n\
                      {divider}\n\n\
                      PCRE2 regex engine error:\n{pcre_err}",
+                     patterns
                 );
             }
         }
     }
 
     /// Build a matcher using PCRE2.
-    ///
-    /// If there was a problem building the matcher (such as a regex syntax
-    /// error), then an error is returned.
-    ///
-    /// If the `pcre2` feature is not enabled then this always returns an
-    /// error.
-    fn matcher_pcre2(&self) -> anyhow::Result<PatternMatcher> {
+    fn matcher_pcre2_build(
+        patterns: &[String],
+        fixed_strings: bool,
+        case_mode: CaseMode,
+        boundary: Option<BoundaryMode>,
+        no_unicode: bool,
+        multiline: bool,
+        multiline_dotall: bool,
+        crlf: bool,
+    ) -> anyhow::Result<PatternMatcher> {
         #[cfg(feature = "pcre2")]
         {
             let mut builder = grep::pcre2::RegexMatcherBuilder::new();
-            builder.multi_line(true).fixed_strings(self.fixed_strings);
-            match self.case {
+            builder.multi_line(true).fixed_strings(fixed_strings);
+            match case_mode {
                 CaseMode::Sensitive => builder.caseless(false),
                 CaseMode::Insensitive => builder.caseless(true),
                 CaseMode::Smart => builder.case_smart(true),
             };
-            if let Some(ref boundary) = self.boundary {
+            if let Some(ref boundary) = boundary {
                 match *boundary {
                     BoundaryMode::Line => builder.whole_line(true),
                     BoundaryMode::Word => builder.word(true),
                 };
             }
-            // For whatever reason, the JIT craps out during regex compilation with
-            // a "no more memory" error on 32 bit systems. So don't use it there.
             if cfg!(target_pointer_width = "64") {
                 builder
                     .jit_if_available(true)
-                    // The PCRE2 docs say that 32KB is the default, and that 1MB
-                    // should be big enough for anything. But let's crank it to
-                    // 10MB.
                     .max_jit_stack_size(Some(10 * (1 << 20)));
             }
-            if !self.no_unicode {
+            if !no_unicode {
                 builder.utf(true).ucp(true);
             }
-            if self.multiline {
-                builder.dotall(self.multiline_dotall);
+            if multiline {
+                builder.dotall(multiline_dotall);
             }
-            if self.crlf {
+            if crlf {
                 builder.crlf(true);
             }
-            let m = builder.build_many(&self.patterns.patterns)?;
+            let m = builder.build_many(patterns)?;
             Ok(PatternMatcher::PCRE2(m))
         }
         #[cfg(not(feature = "pcre2"))]
@@ -465,56 +539,61 @@ impl HiArgs {
     }
 
     /// Build a matcher using Rust's regex engine.
-    ///
-    /// If there was a problem building the matcher (such as a regex syntax
-    /// error), then an error is returned.
-    fn matcher_rust(&self) -> anyhow::Result<PatternMatcher> {
+    fn matcher_rust_build(
+        patterns: &[String],
+        fixed_strings: bool,
+        case_mode: CaseMode,
+        boundary: Option<BoundaryMode>,
+        no_unicode: bool,
+        multiline: bool,
+        multiline_dotall: bool,
+        crlf: bool,
+        null_data: bool,
+        regex_size_limit: Option<usize>,
+        dfa_size_limit: Option<usize>,
+        binary_detection: &BinaryDetection,
+    ) -> anyhow::Result<PatternMatcher> {
         let mut builder = grep::regex::RegexMatcherBuilder::new();
         builder
             .multi_line(true)
-            .unicode(!self.no_unicode)
+            .unicode(!no_unicode)
             .octal(false)
-            .fixed_strings(self.fixed_strings);
-        match self.case {
+            .fixed_strings(fixed_strings);
+        match case_mode {
             CaseMode::Sensitive => builder.case_insensitive(false),
             CaseMode::Insensitive => builder.case_insensitive(true),
             CaseMode::Smart => builder.case_smart(true),
         };
-        if let Some(ref boundary) = self.boundary {
+        if let Some(ref boundary) = boundary {
             match *boundary {
                 BoundaryMode::Line => builder.whole_line(true),
                 BoundaryMode::Word => builder.word(true),
             };
         }
-        if self.multiline {
-            builder.dot_matches_new_line(self.multiline_dotall);
-            if self.crlf {
+        if multiline {
+            builder.dot_matches_new_line(multiline_dotall);
+            if crlf {
                 builder.crlf(true).line_terminator(None);
             }
         } else {
             builder.line_terminator(Some(b'\n')).dot_matches_new_line(false);
-            if self.crlf {
+            if crlf {
                 builder.crlf(true);
             }
-            // We don't need to set this in multiline mode since multiline
-            // matchers don't use optimizations related to line terminators.
-            // Moreover, a multiline regex used with --null-data should
-            // be allowed to match NUL bytes explicitly, which this would
-            // otherwise forbid.
-            if self.null_data {
+            if null_data {
                 builder.line_terminator(Some(b'\x00'));
             }
         }
-        if let Some(limit) = self.regex_size_limit {
+        if let Some(limit) = regex_size_limit {
             builder.size_limit(limit);
         }
-        if let Some(limit) = self.dfa_size_limit {
+        if let Some(limit) = dfa_size_limit {
             builder.dfa_size_limit(limit);
         }
-        if !self.binary.is_none() {
+        if !binary_detection.is_none() {
             builder.ban_byte(Some(b'\x00'));
         }
-        let m = match builder.build_many(&self.patterns.patterns) {
+        let m = match builder.build_many(patterns) {
             Ok(m) => m,
             Err(err) => {
                 anyhow::bail!(suggest_text(suggest_multiline(err.to_string())))
@@ -523,19 +602,65 @@ impl HiArgs {
         Ok(PatternMatcher::RustRegex(m))
     }
 
+
+    /// Compiles a slice of pattern strings into a Vec of PatternMatchers,
+    /// applying the main HiArgs settings for engine, case, etc.
+    fn compile_patterns(
+        low_args: &LowArgs, // To access settings like case, engine, fixed_strings
+        pattern_strings: &[String],
+    ) -> anyhow::Result<Vec<PatternMatcher>> {
+        if pattern_strings.is_empty() {
+            return Ok(vec![]);
+        }
+        // For AND patterns, we compile each one individually.
+        // This ensures that `foo bar` in `--and "foo bar"` is one matcher,
+        // and if the user meant two separate words, they'd use two `--and` flags.
+        let mut compiled = Vec::with_capacity(pattern_strings.len());
+        for pat_str in pattern_strings {
+            // We pass a slice containing a single pattern string to the builder.
+            let matcher = HiArgs::compile_matcher_for_engine(
+                low_args.engine,
+                &[pat_str.clone()], // build_many expects a slice
+                low_args.fixed_strings,
+                low_args.case,
+                low_args.boundary,
+                low_args.no_unicode,
+                low_args.multiline,
+                low_args.multiline_dotall,
+                low_args.crlf,
+                low_args.null_data,
+                low_args.regex_size_limit,
+                low_args.dfa_size_limit,
+                &BinaryDetection::from_low_args(&State::new()?, low_args), // Re-create or pass BinaryDetection
+            )?;
+            compiled.push(matcher);
+        }
+        Ok(compiled)
+    }
+
+
     /// Returns true if some non-zero number of matches is believed to be
     /// possible.
     ///
     /// When this returns false, it is impossible for ripgrep to ever report
     /// a match.
     pub(crate) fn matches_possible(&self) -> bool {
+        // If there are no main patterns, no match is possible.
         if self.patterns.patterns.is_empty() {
             return false;
         }
+        // If there are main patterns but no AND patterns, matches are possible.
+        // If there are AND patterns, they don't prevent a match on their own,
+        // the main patterns must also exist.
         if self.max_count == Some(0) {
             return false;
         }
         true
+    }
+    
+    /// Returns the compiled AND patterns.
+    pub(crate) fn compiled_and_patterns(&self) -> &[PatternMatcher] {
+        &self.compiled_and_patterns
     }
 
     /// Returns the "mode" that ripgrep should operate in.
@@ -614,6 +739,7 @@ impl HiArgs {
         builder
             .byte_offset(self.byte_offset)
             .color_specs(self.colors.clone())
+            .compiled_and_patterns(self.compiled_and_patterns.clone())
             .column(self.column)
             .heading(self.heading)
             .hyperlink(self.hyperlink_config.clone())
@@ -636,12 +762,6 @@ impl HiArgs {
             .separator_path(self.path_separator.clone())
             .stats(self.stats.is_some())
             .trim_ascii(self.trim);
-        if !self.and_keyword_strings.is_empty() {
-            builder.and_keywords(
-                self.and_keyword_strings.clone(),
-                matches!(self.case, CaseMode::Insensitive),
-            );
-        }
         // When doing multi-threaded searching, the buffer writer is
         // responsible for writing separators since it is the only thing that
         // knows whether something has been printed or not. But for the single
@@ -1023,31 +1143,31 @@ impl Patterns {
         // extra cost. It is lamentable that we pay the extra cost here to
         // de-duplicate for a likely uncommon case, but I've seen this have a
         // big impact on real world data.
-        let mut seen = HashSet::new();
+        let mut seen_patterns = HashSet::new();
         let mut patterns = Vec::with_capacity(low.patterns.len());
-        let mut add = |pat: String| {
-            if !seen.contains(&pat) {
-                seen.insert(pat.clone());
+        let mut add_pattern = |pat: String| {
+            if !seen_patterns.contains(&pat) {
+                seen_patterns.insert(pat.clone());
                 patterns.push(pat);
             }
         };
         for source in low.patterns.drain(..) {
             match source {
-                PatternSource::Regexp(pat) => add(pat),
+                PatternSource::Regexp(pat) => add_pattern(pat),
                 PatternSource::File(path) => {
                     if path == Path::new("-") {
                         anyhow::ensure!(
                             !state.stdin_consumed,
-                            "error reading -f/--file from stdin: stdin \
-                             has already been consumed"
+                            "error reading patterns from stdin via -f/--file: \
+                             stdin has already been consumed"
                         );
                         for pat in grep::cli::patterns_from_stdin()? {
-                            add(pat);
+                            add_pattern(pat);
                         }
                         state.stdin_consumed = true;
                     } else {
                         for pat in grep::cli::patterns_from_path(&path)? {
-                            add(pat);
+                            add_pattern(pat);
                         }
                     }
                 }
@@ -1055,6 +1175,66 @@ impl Patterns {
         }
         Ok(Patterns { patterns })
     }
+}
+
+/// Processes the `and_patterns` from `LowArgs` into a `Vec<String>`.
+/// This is similar to how `Patterns::from_low_args` handles main patterns.
+fn process_and_patterns(
+    state: &mut State,
+    low: &mut LowArgs,
+) -> anyhow::Result<Vec<String>> {
+    if low.and_patterns.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut seen_patterns = HashSet::new();
+    let mut and_patterns = Vec::with_capacity(low.and_patterns.len());
+    let mut add_pattern = |pat: String| {
+        if !seen_patterns.contains(&pat) {
+            seen_patterns.insert(pat.clone());
+            and_patterns.push(pat);
+        }
+    };
+
+    for source in low.and_patterns.drain(..) {
+        match source {
+            PatternSource::Regexp(pat_str) => {
+                // If the pattern string from a direct --and flag contains whitespace,
+                // split it into sub-patterns. Users wanting literal spaces in such
+                // a pattern should use regex escapes like \s or quotes if the
+                // regex engine supports it for literals.
+                if pat_str.contains(char::is_whitespace) {
+                    for sub_pat in pat_str.split_whitespace() {
+                        if !sub_pat.is_empty() {
+                            add_pattern(sub_pat.to_string());
+                        }
+                    }
+                } else {
+                    add_pattern(pat_str);
+                }
+            }
+            PatternSource::File(path) => {
+                // Patterns from a file are treated as-is, one pattern per line.
+                // No splitting by whitespace is performed on lines from a file.
+                if path == Path::new("-") {
+                    anyhow::ensure!(
+                        !state.stdin_consumed,
+                        "error reading --and patterns from stdin via -f/--file: \
+                         stdin has already been consumed"
+                    );
+                    for pat_from_file in grep::cli::patterns_from_stdin()? {
+                        add_pattern(pat_from_file);
+                    }
+                    state.stdin_consumed = true;
+                } else {
+                    for pat_from_file in grep::cli::patterns_from_path(&path)? {
+                        add_pattern(pat_from_file);
+                    }
+                }
+            }
+        }
+    }
+    Ok(and_patterns)
 }
 
 /// The collection of paths we want to search for.

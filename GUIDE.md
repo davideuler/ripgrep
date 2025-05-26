@@ -15,7 +15,6 @@ translatable to any command line shell environment.
 * [Automatic filtering](#automatic-filtering)
 * [Manual filtering: globs](#manual-filtering-globs)
 * [Manual filtering: file types](#manual-filtering-file-types)
-* [Searching for multiple required keywords (AND logic)](#searching-for-multiple-required-keywords-and-logic)
 * [Replacements](#replacements)
 * [Configuration file](#configuration-file)
 * [File encoding](#file-encoding)
@@ -256,6 +255,49 @@ For a more in depth description of how glob patterns in a `.gitignore` file
 are interpreted, please see `man gitignore`.
 
 
+### Manual filtering: combining patterns with AND logic
+
+Sometimes you need to ensure that multiple distinct patterns all appear in a line before it's considered a match. While complex regular expressions can sometimes achieve this, ripgrep provides a convenient `--and` flag for this purpose.
+
+The `--and` flag allows you to specify one or more additional patterns that *must all* be present in a line that has already matched the main pattern(s).
+
+There are two ways to use the `--and` flag:
+
+1.  **Multiple `--and` flags**: Each flag specifies one pattern that must match.
+    ```bash
+    $ rg main_pattern --and pattern1 --and pattern2 path/to/search
+    ```
+    For example, to find lines in `~/programming-tips/` that contain "list", "installed", AND "packages", case-insensitively:
+    ```bash
+    $ rg -i --and list --and installed --and packages ~/programming-tips/
+    ```
+    A line will only be printed if it matches the main pattern (if one is provided, otherwise it matches any line) AND "list" AND "installed" AND "packages".
+
+2.  **Single `--and` flag with a space-separated string**: A single string containing multiple words separated by spaces can be provided. Ripgrep will split this string by whitespace, and each resulting word becomes an individual pattern that must match.
+    ```bash
+    $ rg main_pattern --and "pattern1 pattern2 pattern3" path/to/search
+    ```
+    For example, this is equivalent to the previous example:
+    ```bash
+    $ rg --and "list installed package" -i ~/programming-tips/
+    ```
+    **Important Note on Order**: When using the space-separated string form like `--and "list installed package"`, this only ensures that all terms ("list", "installed", "package") are present on the line. It does *not* enforce their order or that they form a contiguous phrase. If you need to match an ordered sequence or a specific phrase, you should use a regular expression with `.*` (or other regex operators) to define that order, for example:
+    ```bash
+    $ rg --and "list.*installed.*package" -i ~/programming-tips/
+    ```
+    This would match "list" followed by "installed" followed by "package", anywhere on the line.
+
+**Interaction with other flags:**
+
+*   **Case Insensitivity (`-i`, `--ignore-case`):** If specified, case insensitivity applies to all patterns provided via `--and` flags, as well as the main pattern.
+*   **Word Match (`-w`, `--word-regexp`):** If `-w` is used, the word boundary requirement applies to the main pattern. For patterns specified with `--and`, if you want them to also match as whole words, you would typically ensure they are compiled as regexes that respect word boundaries (e.g., by not using `-F` and ensuring the patterns themselves are word-like or use `\b`).
+*   **Invert Match (`-v`, `--invert-match`):** When used with `--and`, the inversion applies to the *entire condition*. That is, `rg -v main_pattern --and and_pattern1` will print lines that *do not* match (main_pattern AND and_pattern1).
+*   **Literal Strings (`-F`, `--fixed-strings`):** If `-F` is used, it applies to the main pattern. Patterns supplied via `--and` are still treated as regular expressions by default. If you need literal matching for an AND pattern, it must be a simple string without regex metacharacters.
+*   **Patterns from file (`-f`):** When using `--and -f path/to/patterns.txt`, each line in `patterns.txt` is treated as a distinct AND pattern. Lines from such a file are *not* split by whitespace; if a line in the file is "foo bar", it's treated as a single AND pattern "foo bar".
+
+This flag is useful for refining searches where multiple conditions must be met on the same line without constructing overly complex single regular expressions.
+
+
 ### Manual filtering: globs
 
 In the previous section, we talked about ripgrep's filtering that it does by
@@ -437,73 +479,6 @@ Both `rg --type sh` and `rg --type all` would only search for matches in
 by the `sh` file type don't include files without an extension. On the
 other hand, `rg --type-not all` would search `my-shell-script` but not
 `my-shell-library.bash`.
-
-
-### Searching for multiple required keywords (AND logic)
-
-Sometimes you need to find lines that contain several specific words, but the order or exact positioning of these words doesn't matter. The `--and` flag is designed for this purpose. It allows you to specify a set of space-separated keywords, and only lines containing *all* of those keywords will be matched.
-
-**Syntax:**
-
-```
-rg --and "keyword1 keyword2 keyword3" [path...]
-```
-or with a primary pattern:
-```
-rg main_pattern --and "keyword1 keyword2" [path...]
-```
-
-The keywords are provided as a single string, separated by spaces.
-
-**Behavior:**
-
-*   **Additional Filter:** The `--and` flag acts as an additional filter on the lines being considered.
-*   **With a Primary Pattern:** If you provide a primary pattern (e.g., `rg main_pattern --and "k1 k2"`), ripgrep first finds lines that match `main_pattern`. Then, from those lines, it filters them further, keeping only the lines that also contain *all* keywords specified with `--and` (e.g., both "k1" and "k2").
-*   **Without a Primary Pattern:** If no primary pattern is given (e.g., `rg --and "k1 k2"`), ripgrep considers all lines in the specified files (or stdin) and prints those that contain *all* the specified keywords.
-*   **Order Invariant:** The order in which the keywords appear on the line does not matter. As long as all specified keywords are present, the line is a match (assuming it also matches any primary pattern).
-*   **Case Sensitivity:** The matching of keywords by `--and` respects the overall case sensitivity setting. If `-i` (`--ignore-case`) is used, then the keyword matching for `--and` also becomes case-insensitive. If `--smart-case` is used, the case sensitivity of `--and` keywords will depend on the case of the primary pattern (if any) or behave case-insensitively if the AND keywords themselves are all lowercase (when no primary pattern is given). If no case-modifying flags are used, the keyword matching is case-sensitive.
-
-**Examples:**
-
-Let's say you have a file `example.txt` with the following content:
-
-```
-$ cat <<EOF > example.txt
-hello world line one
-hello universe line two
-world says hello line three
-EOF
-```
-
-1.  Search for lines containing both "hello" and "world":
-    ```
-    $ rg --and "hello world" example.txt
-    hello world line one
-    world says hello line three
-    ```
-    Both lines 1 and 3 contain "hello" and "world", so they are printed.
-
-2.  Search for lines matching the primary pattern "hello" AND also containing "line one":
-    ```
-    $ rg hello --and "line one" example.txt
-    hello world line one
-    ```
-    Line 1 matches "hello" and also contains "line one".
-    Line 2 matches "hello" but does not contain "line one".
-    Line 3 contains "line one" but does not match the primary pattern "hello" (as the first word). (Correction: `rg hello` would match line 3 if "hello" is anywhere. The example output is correct for `rg hello` matching line 1 and then filtering with `--and "line one"`)
-    If the primary pattern `hello` is meant to match anywhere, line 3 would be:
-    `world says hello line three` matches `hello`. Then, does it contain "line one"? No.
-    So the output remains correct.
-
-3.  Search case-insensitively for lines containing "HELLO" and "WORLD":
-    ```
-    $ rg -i --and "HELLO WORLD" example.txt
-    hello world line one
-    world says hello line three
-    ```
-
-This flag is particularly useful when you need to narrow down searches based on the co-occurrence of several terms without constructing complex regular expressions.
-
 
 ### Replacements
 
@@ -1063,6 +1038,7 @@ used options that will likely impact how you use ripgrep on a regular basis.
 * `-h`: Show ripgrep's condensed help output.
 * `--help`: Show ripgrep's longer form help output. (Nearly what you'd find in
   ripgrep's man page, so pipe it into a pager!)
+* `--and PATTERN`: Specify an additional pattern that must also match. Can be used multiple times. If PATTERN contains spaces, it's split into multiple sub-patterns that must all match (e.g., `--and "foo bar"` means "foo" AND "bar").
 * `-i/--ignore-case`: When searching for a pattern, ignore case differences.
   That is `rg -i fast` matches `fast`, `fASt`, `FAST`, etc.
 * `-S/--smart-case`: This is similar to `--ignore-case`, but disables itself
